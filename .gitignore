@@ -205,3 +205,50 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ============================================
+# MLOps Project Specific
+# ============================================
+
+# 데이터 폴더 (원본 데이터, 처리된 데이터)
+data/
+datasets/
+raw_data/
+
+# 모델 가중치 파일
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+
+# MLflow 아티팩트 (로컬 저장시)
+mlflow-artifacts/
+mlruns/
+
+# MinIO 데이터 (로컬 저장시)
+minio-data/
+
+# DVC 관련
+.dvc/cache/
+.dvc/tmp/
+
+# Jupyter 노트북 출력
+*.ipynb
+
+# 대용량 파일
+*.zip
+*.tar.gz
+*.tar
+*.h5
+*.hdf5
+
+# 로컬 설정 파일
+.env.local
+.env.*.local
+*.env.backup
+
+# Docker 볼륨 데이터
+postgres_data/
+

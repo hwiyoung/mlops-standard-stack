@@ -1,0 +1,129 @@
+# ============================================
+# 변화탐지 (Change Detection) 학습 설정
+# ============================================
+# 사용법: python src/training/train_cd.py --config configs/train_cd.yaml
+
+# 실험 설정
+experiment:
+  name: "satellite-change-detection"
+  run_name: null  # null이면 자동 생성 (cd-run-YYYYMMDD-HHMMSS)
+  tags:
+    project: "mlops-standard-stack"
+    task: "change-detection"
+    environment: "development"
+
+# 데이터 설정
+data:
+  # MinIO 버킷 설정
+  minio:
+    endpoint: "http://localhost:9000"
+    bucket_raw: "raw-data"
+    bucket_processed: "processed-data"
+    bucket_artifacts: "mlflow-artifacts"
+  
+  # 로컬 데이터 경로 (MinIO에서 다운로드 후 사용)
+  local:
+    root_dir: "./data/change_detection"
+    pre_dir: "pre"
+    post_dir: "post"
+    mask_dir: "mask"
+  
+  # 데이터 분할
+  split:
+    train_ratio: 0.8
+    val_ratio: 0.1
+    test_ratio: 0.1
+    random_seed: 42
+
+# TorchGeo 설정
+torchgeo:
+  patch_size: 256         # 패치 크기 (픽셀)
+  samples_per_epoch: 1000 # 에폭당 샘플 수
+  crs: "EPSG:4326"        # 좌표계
+  res: null               # 해상도 (null이면 원본 사용)
+
+# 모델 설정
+model:
+  architecture: "unet"    # unet, fpn, deeplabv3plus, pspnet
+  encoder:
+    name: "resnet50"      # resnet18, resnet34, resnet50, efficientnet-b0, etc.
+    weights: "imagenet"   # imagenet, null (random init)
+  in_channels: 6          # Pre + Post (3 + 3)
+  num_classes: 2          # 변화/비변화
+  
+  # 추가 모델 옵션
+  decoder_use_batchnorm: true
+  activation: null        # 최종 활성화 (null, sigmoid, softmax)
+
+# 학습 설정
+training:
+  epochs: 50
+  batch_size: 8
+  accumulation_steps: 1   # Gradient accumulation
+  
+  # 옵티마이저
+  optimizer:
+    name: "adamw"         # adam, adamw, sgd
+    lr: 0.001
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+  
+  # 스케줄러
+  scheduler:
+    name: "cosine"        # cosine, step, plateau, none
+    warmup_epochs: 5
+    min_lr: 0.00001
+  
+  # 손실 함수
+  loss:
+    name: "cross_entropy" # cross_entropy, dice, focal, combined
+    class_weights: null   # [0.3, 0.7] 클래스 가중치
+    focal_gamma: 2.0      # Focal loss용
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10
+    metric: "val_iou"
+    mode: "max"
+
+# 검증 설정
+validation:
+  interval: 1             # 검증 주기 (에폭)
+  metrics:
+    - "iou"
+    - "f1"
+    - "accuracy"
+    - "precision"
+    - "recall"
+
+# 체크포인트 설정
+checkpoint:
+  save_dir: "./checkpoints"
+  save_top_k: 3
+  monitor: "val_iou"
+  mode: "max"
+  filename: "cd-{epoch:02d}-{val_iou:.4f}"
+
+# 로깅 설정
+logging:
+  log_interval: 10        # 배치 간격
+  save_visualizations: true
+  num_vis_samples: 4      # 시각화 샘플 수
+  
+  # MLflow 설정
+  mlflow:
+    tracking_uri: "http://localhost:5000"
+    artifact_location: "s3://mlflow-artifacts"
+
+# 하드웨어 설정
+hardware:
+  device: "auto"          # auto, cuda, cpu
+  num_workers: 4
+  pin_memory: true
+  mixed_precision: true   # AMP 사용
+
+# 재현성
+reproducibility:
+  seed: 42
+  deterministic: false    # true면 더 느리지만 완전 재현

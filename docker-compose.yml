@@ -1,0 +1,125 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # PostgreSQL - MLflow 메타데이터 백엔드 스토어
+  # ============================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: mlops-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mlflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mlflow123}
+      POSTGRES_DB: ${POSTGRES_DB:-mlflow}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - mlops-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mlflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # MinIO - S3 호환 오브젝트 스토리지
+  # ============================================
+  minio:
+    image: minio/minio:latest
+    container_name: mlops-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"   # S3 API 포트
+      - "9001:9001"   # 웹 콘솔 포트
+    networks:
+      - mlops-network
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # MinIO 초기 버킷 생성 (일회성 작업)
+  # ============================================
+  minio-init:
+    image: minio/mc:latest
+    container_name: mlops-minio-init
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio_secure_password_2024}
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set myminio http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
+      mc mb myminio/raw-data --ignore-existing;
+      mc mb myminio/processed-data --ignore-existing;
+      mc mb myminio/mlflow-artifacts --ignore-existing;
+      mc mb myminio/models --ignore-existing;
+      mc anonymous set download myminio/mlflow-artifacts;
+      echo 'MinIO buckets initialized: raw-data, processed-data, mlflow-artifacts, models';
+      exit 0;
+      "
+    networks:
+      - mlops-network
+
+  # ============================================
+  # MLflow Tracking Server
+  # ============================================
+  mlflow:
+    build:
+      context: ./docker/mlflow
+      dockerfile: Dockerfile
+    container_name: mlops-mlflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      # PostgreSQL 백엔드 스토어 설정
+      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-mlflow}:${POSTGRES_PASSWORD:-mlflow123}@postgres:5432/${POSTGRES_DB:-mlflow}
+      # MinIO (S3 호환) 아티팩트 스토어 설정
+      MLFLOW_ARTIFACTS_DESTINATION: s3://mlflow-artifacts
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://${POSTGRES_USER:-mlflow}:${POSTGRES_PASSWORD:-mlflow123}@postgres:5432/${POSTGRES_DB:-mlflow}
+      --default-artifact-root s3://mlflow-artifacts
+    ports:
+      - "5000:5000"
+    networks:
+      - mlops-network
+
+# ============================================
+# 네트워크 설정
+# ============================================
+networks:
+  mlops-network:
+    driver: bridge
+
+# ============================================
+# 영구 볼륨 설정
+# ============================================
+volumes:
+  postgres_data:
+    driver: local
+  minio_data:
+    driver: local
