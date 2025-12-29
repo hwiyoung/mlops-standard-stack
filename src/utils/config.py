@@ -229,9 +229,12 @@ def set_config(config: Config) -> None:
 
 if __name__ == "__main__":
     # 테스트
+    print("=" * 60)
+    print("=== Change Detection Config 테스트 ===")
+    print("=" * 60)
+    
     config = load_config("configs/train_cd.yaml")
     
-    print("=== Config 테스트 ===")
     print(f"Experiment name: {config.experiment.name}")
     print(f"Model architecture: {config.model.architecture}")
     print(f"Encoder: {config.model.encoder.name}")
@@ -241,6 +244,33 @@ if __name__ == "__main__":
     print("\n=== 점 표기법 조회 ===")
     print(f"model.encoder.name: {config.get('model.encoder.name')}")
     print(f"data.minio.bucket_raw: {config.get('data.minio.bucket_raw')}")
+    
+    # NVS Config 테스트
+    print("\n" + "=" * 60)
+    print("=== NVS (3D Gaussian Splatting) Config 테스트 ===")
+    print("=" * 60)
+    
+    try:
+        nvs_config = load_config("configs/train_nvs.yaml")
+        
+        print(f"Experiment name: {nvs_config.experiment.name}")
+        print(f"Method: {nvs_config.experiment.tags.method}")
+        print(f"\n[Model]")
+        print(f"  SH Degree: {nvs_config.model.sh_degree}")
+        print(f"  Opacity Init: {nvs_config.model.gaussian.opacity_init}")
+        print(f"\n[Training]")
+        print(f"  Iterations: {nvs_config.training.iterations}")
+        print(f"  Save Iterations: {nvs_config.training.save_iterations}")
+        print(f"\n[Densification]")
+        print(f"  Enabled: {nvs_config.training.densification.enabled}")
+        print(f"  Interval: {nvs_config.training.densification.interval}")
+        print(f"  Start: {nvs_config.training.densification.start_iteration}")
+        print(f"  End: {nvs_config.training.densification.end_iteration}")
+        print(f"\n[Pipeline]")
+        print(f"  Output Dir: {nvs_config.pipeline.output_dir}")
+        print(f"  Save Video: {nvs_config.pipeline.save.video}")
+    except FileNotFoundError:
+        print("NVS config 파일이 없습니다: configs/train_nvs.yaml")
     
     print("\n=== 딕셔너리 변환 ===")
     print(config.to_dict().keys())

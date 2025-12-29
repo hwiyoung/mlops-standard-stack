@@ -1,0 +1,39 @@
+# NVS (3D Gaussian Splatting) Training Dependencies
+
+# Core
+torch>=2.1.0
+torchvision>=0.16.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# 3D Gaussian Splatting
+gsplat>=1.0.0
+
+# Image Processing
+Pillow>=10.0.0
+opencv-python>=4.8.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.9
+
+# Camera & 3D
+pycolmap>=0.6.0
+plyfile>=1.0.0
+open3d>=0.17.0
+
+# MLOps
+mlflow>=2.10.0
+boto3>=1.28.0
+python-dotenv>=1.0.0
+
+# Config & Utils
+PyYAML>=6.0.0
+tqdm>=4.66.0
+tensorboard>=2.14.0
+
+# Metrics
+lpips>=0.1.4
+pytorch-msssim>=1.0.0
+
+# Visualization
+matplotlib>=3.7.0
+plotly>=5.18.0

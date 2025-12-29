@@ -1,0 +1,171 @@
+# ============================================
+# Novel View Synthesis (3D Gaussian Splatting) 학습 설정
+# ============================================
+# 사용법: python src/training/train_nvs.py --config configs/train_nvs.yaml
+
+# 실험 설정
+experiment:
+  name: "nvs-gaussian-splatting"
+  run_name: null  # null이면 자동 생성 (gs-run-YYYYMMDD-HHMMSS)
+  tags:
+    project: "mlops-standard-stack"
+    task: "novel-view-synthesis"
+    method: "3dgs"
+    environment: "development"
+
+# 데이터 설정
+data:
+  # MinIO 버킷 설정
+  minio:
+    endpoint: "http://localhost:9000"
+    bucket_raw: "raw-data"
+    bucket_processed: "processed-data"
+    bucket_artifacts: "mlflow-artifacts"
+  
+  # 데이터 경로 (COLMAP 구조)
+  source_path: "./data/nvs_project"
+  structure:
+    images: "images"           # 원본 이미지 폴더
+    sparse: "sparse/0"         # COLMAP sparse reconstruction
+    # COLMAP 파일
+    cameras: "sparse/0/cameras.bin"
+    images_bin: "sparse/0/images.bin"
+    points3d: "sparse/0/points3D.bin"
+  
+  # 이미지 설정
+  resolution: -1               # -1: 원본, 1/2/4/8: 다운샘플 비율
+  white_background: false
+  eval_split: 0.1              # 평가용 분할 비율
+
+# 모델 설정 (3D Gaussian Splatting)
+model:
+  # Spherical Harmonics
+  sh_degree: 3                 # SH degree (0-3), 높을수록 복잡한 뷰 의존성
+  
+  # Gaussian 초기화
+  init:
+    num_points: null           # null이면 COLMAP point cloud 사용
+    random_init: false         # true면 랜덤 초기화
+    spatial_lr_scale: 1.0      # 공간 학습률 스케일
+  
+  # Gaussian 속성
+  gaussian:
+    opacity_init: 0.1          # 초기 opacity
+    scale_init: 1.0            # 초기 scale factor
+    rotation_init: "identity"  # identity, random
+  
+  # 렌더링 설정
+  rendering:
+    compute_cov3D_python: false
+    convert_SHs_python: false
+    debug: false
+
+# 학습 설정
+training:
+  # Iteration 설정
+  iterations: 30000            # 총 학습 iteration
+  warmup_iterations: 500       # Warmup iterations
+  
+  # 체크포인트 저장
+  save_iterations: [7000, 15000, 30000]
+  checkpoint_iterations: [7000, 15000, 30000]
+  
+  # 테스트/평가
+  test_iterations: [7000, 15000, 30000]
+  
+  # 학습률 설정
+  learning_rate:
+    position_lr_init: 0.00016
+    position_lr_final: 0.0000016
+    position_lr_delay_mult: 0.01
+    position_lr_max_steps: 30000
+    
+    feature_lr: 0.0025
+    opacity_lr: 0.05
+    scaling_lr: 0.005
+    rotation_lr: 0.001
+  
+  # Densification (Point 추가/제거)
+  densification:
+    enabled: true
+    start_iteration: 500
+    end_iteration: 15000
+    interval: 100              # Densification 주기
+    
+    # 임계값
+    grad_threshold: 0.0002     # Gradient 임계값
+    opacity_threshold: 0.005   # Opacity pruning 임계값
+    scale_threshold: 0.01      # Scale pruning 임계값
+    
+    # Screen space
+    percent_dense: 0.01
+    size_threshold: 20
+  
+  # Opacity Reset
+  opacity_reset_interval: 3000
+  
+  # Loss 설정
+  loss:
+    lambda_dssim: 0.2          # SSIM loss 가중치 (1 - lambda = L1)
+    
+  # 정규화
+  regularization:
+    lambda_opacity: 0.0        # Opacity 정규화
+    lambda_scale: 0.0          # Scale 정규화
+
+# 검증 설정
+validation:
+  interval: 1000               # 검증 주기 (iterations)
+  metrics:
+    - "psnr"
+    - "ssim"
+    - "lpips"
+  
+  # 렌더링 저장
+  save_renders: true
+  num_render_views: 5          # 저장할 뷰 수
+
+# 파이프라인 설정
+pipeline:
+  # 출력 경로
+  output_dir: "./output/nvs"
+  model_path: null             # null이면 output_dir 사용
+  
+  # 결과물 저장
+  save:
+    point_cloud: true          # point_cloud.ply 저장
+    cameras: true              # cameras.json 저장
+    config: true               # config.yaml 저장
+    renders: true              # 렌더링 이미지 저장
+    video: true                # 360도 회전 영상 저장
+  
+  # 비디오 설정
+  video:
+    fps: 30
+    num_frames: 120            # 360도 회전 프레임 수
+
+# 로깅 설정
+logging:
+  log_interval: 100            # 로깅 주기 (iterations)
+  save_visualizations: true
+  
+  # MLflow 설정
+  mlflow:
+    tracking_uri: "http://localhost:5000"
+    artifact_location: "s3://mlflow-artifacts"
+
+# 하드웨어 설정
+hardware:
+  device: "auto"               # auto, cuda, cpu
+  data_device: "cuda"          # 데이터 로드 디바이스
+  num_workers: 4
+  
+  # 메모리 최적화
+  memory:
+    max_gaussians: 5000000     # 최대 Gaussian 수 (메모리 제한)
+    batch_size: 1              # 현재는 1만 지원
+
+# 재현성
+reproducibility:
+  seed: 42
+  deterministic: false

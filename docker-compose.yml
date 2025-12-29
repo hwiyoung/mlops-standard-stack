@@ -108,6 +108,42 @@ services:
     networks:
       - mlops-network
 
+  # ============================================
+  # NVS (3D Gaussian Splatting) 학습 서비스
+  # ============================================
+  nvs-train:
+    build:
+      context: .
+      dockerfile: docker/nvs/Dockerfile
+    image: mlops-nvs-train:latest
+    container_name: nvs-train
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minio_secure_password_2024}
+    volumes:
+      - ./data:/workspace/data
+      - ./output:/workspace/output
+      - ./configs:/workspace/configs
+      - ./checkpoints:/workspace/checkpoints
+    depends_on:
+      - minio
+      - mlflow
+    networks:
+      - mlops-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # 기본 명령어 (docker-compose run으로 오버라이드 가능)
+    command: ["python", "src/training/train_nvs.py", "--config", "configs/train_nvs.yaml"]
+
 # ============================================
 # 네트워크 설정
 # ============================================
