@@ -144,6 +144,34 @@ services:
     # 기본 명령어 (docker-compose run으로 오버라이드 가능)
     command: ["python", "src/training/train_nvs.py", "--config", "configs/train_nvs.yaml"]
 
+  # ============================================
+  # MLOps Dashboard (Streamlit)
+  # ============================================
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    image: mlops-dashboard:latest
+    container_name: mlops-dashboard
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minio_secure_password_2024}
+    volumes:
+      - ./data:/workspace/data
+      - ./output:/workspace/output
+      - ./configs:/workspace/configs
+      - ./checkpoints:/workspace/checkpoints
+    ports:
+      - "8501:8501"
+    depends_on:
+      - minio
+      - mlflow
+    networks:
+      - mlops-network
+    command: ["streamlit", "run", "dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+
 # ============================================
 # 네트워크 설정
 # ============================================
