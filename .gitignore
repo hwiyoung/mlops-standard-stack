@@ -251,4 +251,15 @@ minio-data/
 
 # Docker 볼륨 데이터
 postgres_data/
+minio_data/
+
+# 출력 데이터
+output/
+checkpoints/
+logs/
+temp/
+
+# 시스템 파일
+.DS_Store
+Thumbs.db
 

@@ -250,7 +250,11 @@ def upload_directory(
     print(f"   ⏭️  스킵됨: {skipped}개")
     print(f"   ❌ 실패: {failed}개")
     print()
-    print(f"📌 MinIO Console에서 확인: http://localhost:9001/browser/{bucket}")
+
+    # 외부 접근을 위한 IP 설정
+    public_ip = os.getenv("PUBLIC_IP", "localhost")
+    console_port = os.getenv("MINIO_CONSOLE_PORT", "9001")
+    print(f"📌 {bucket} 버킷 확인: http://{public_ip}:{console_port}/browser/{bucket}")
     
     return uploaded, skipped, failed
 

@@ -281,11 +281,24 @@ class MinIOUploader:
             ExpiresIn=86400 * 7  # 7일
         )
         
+        # 외부 접근을 위해 호스트명 교체 (PUBLIC_IP 환경변수 기준)
+        public_ip = os.getenv("PUBLIC_IP")
+        if public_ip and public_ip not in ["localhost", "127.0.0.1", "mlflow", "minio"]:
+            import re
+            # http://minio:9000/path -> http://PUBLIC_IP:9000/path
+            # 호스트 부분(http://이후 첫 번째 : 또는 / 전까지)을 교체
+            url = re.sub(r'(http://)[^:/]+', r'\1' + public_ip, url)
+            
         return url
     
     def get_public_url(self, s3_key: str) -> str:
         """공개 URL (MinIO Console)"""
-        return f"{self.endpoint}/{self.bucket}/{s3_key}"
+        public_ip = os.getenv("PUBLIC_IP", "localhost")
+        endpoint = self.endpoint
+        if public_ip not in ["localhost", "127.0.0.1", "mlflow"]:
+            import re
+            endpoint = re.sub(r'(http://)[^:/]+', r'\1' + public_ip, endpoint)
+        return f"{endpoint}/{self.bucket}/{s3_key}"
 
 
 # ============================================

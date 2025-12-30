@@ -33,7 +33,49 @@ env_file = PROJECT_ROOT / ".env"
 if env_file.exists():
     load_dotenv(env_file)
 
+# 외부 접근을 위한 공인 IP 설정
+# 외부 접근을 위한 공인 IP 설정
+def get_default_public_ip():
+    # 1. 브라우저 접속 기반 감지 (Streamlit 1.34+) - 최우선
+    try:
+        host = st.context.headers.get("host", "")
+        if host:
+            if ":" in host:
+                ip = host.split(":")[0]
+            else:
+                ip = host
+            # 내부/로컬 주소는 무시하고 실제 IP인 경우만 반환
+            if ip not in ["localhost", "127.0.0.1", "mlflow", "minio", "0.0.0.0"]:
+                return ip
+    except:
+        pass
 
+    # 2. 환경변수 확인
+    env_ip = os.getenv("PUBLIC_IP")
+    if env_ip and env_ip not in ["localhost", "127.0.0.1", "mlflow", "minio"]:
+        return env_ip
+        
+    # 3. 소켓 기반 감지 (서버의 기본 네트워크 IP)
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "localhost"
+
+# 기본 IP 초기화 (세션 상태 저장)
+if "public_ip" not in st.session_state:
+    st.session_state.public_ip = get_default_public_ip()
+
+PUBLIC_IP = st.session_state.public_ip
+MLFLOW_PORT = os.getenv("MLFLOW_PORT", "5000")
+MINIO_CONSOLE_PORT = os.getenv("MINIO_CONSOLE_PORT", "9001")
+MINIO_API_PORT = os.getenv("MINIO_API_PORT", "9000")
+
+from src.models.gaussian_model import GaussianModel, GaussianModelConfig
 # ============================================
 # 페이지 설정
 # ============================================
@@ -137,6 +179,29 @@ def list_minio_objects(bucket: str, prefix: str = "") -> List[Dict]:
         return []
 
 
+def get_presigned_url(bucket: str, key: str, expires_in: int = 604800) -> str:
+    """MinIO Presigned URL 생성 (외부 IP 반영)"""
+    try:
+        s3 = get_minio_client()
+        url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket, 'Key': key},
+            ExpiresIn=expires_in
+        )
+        
+        # 외부 접근을 위해 호스트명 교체 (대시보드 세션 IP 기준)
+        import re
+        public_ip = st.session_state.get("public_ip", "localhost")
+        if public_ip not in ["localhost", "127.0.0.1", "mlflow", "minio"]:
+            # http://minio:9000/... -> http://PUBLIC_IP:9000/...
+            url = re.sub(r'(http://)[^:/]+', r'\1' + public_ip, url)
+            
+        return url
+    except Exception as e:
+        st.error(f"링크 생성 실패: {e}")
+        return ""
+
+
 def get_config_files() -> List[str]:
     """configs/ 폴더의 YAML 파일 목록"""
     configs_dir = PROJECT_ROOT / "configs"
@@ -162,6 +227,14 @@ def run_command_async(cmd: List[str], cwd: str = None) -> subprocess.Popen:
         text=True,
         bufsize=1
     )
+
+
+def get_data_directories() -> List[str]:
+    """./data 디렉토리의 하위 디렉토리 목록"""
+    data_dir = PROJECT_ROOT / "data"
+    if data_dir.exists():
+        return [d.name for d in data_dir.iterdir() if d.is_dir()]
+    return []
 
 
 def get_mlflow_runs(experiment_name: str = None, max_results: int = 10) -> pd.DataFrame:
@@ -250,9 +323,25 @@ with st.sidebar:
         st.error("❌ MLflow")
     
     st.markdown("---")
-    st.markdown("##### 🔗 Quick Links")
-    st.markdown(f"- [MLflow UI](http://localhost:5000)")
-    st.markdown(f"- [MinIO Console](http://localhost:9001)")
+    st.markdown("### 🌐 네트워크 설정")
+    
+    # 헬프 텍스트 추가
+    st.info("💡 다른 컴퓨터에서 접속 중이라면 아래 IP가 서버의 실제 IP인지 확인해주세요.")
+    
+    new_ip = st.text_input("서버 IP (Server Host)", value=st.session_state.public_ip, help="외부 접속 시 링크가 생성될 IP 주소입니다.")
+    if new_ip != st.session_state.public_ip:
+        st.session_state.public_ip = new_ip
+        st.rerun()
+
+    st.markdown("##### 🔗 Quick Links (미리보기)")
+    mlflow_ui_url = f"http://{st.session_state.public_ip}:{MLFLOW_PORT}"
+    minio_ui_url = f"http://{st.session_state.public_ip}:{MINIO_CONSOLE_PORT}"
+    
+    st.markdown(f"- [📊 MLflow UI]({mlflow_ui_url})")
+    st.markdown(f"- [📦 MinIO Console]({minio_ui_url})")
+    
+    if st.session_state.public_ip in ["localhost", "127.0.0.1", "mlflow"]:
+        st.warning("⚠️ 현재 로컬/내부 주소로 설정되어 있어 외부 접속 시 링크가 작동하지 않을 수 있습니다.")
 
 
 # ============================================
@@ -310,8 +399,22 @@ if selected_tab == "📂 Data Manager":
             objects = list_minio_objects(selected_bucket, prefix_filter)
             if objects:
                 df = pd.DataFrame(objects)
-                st.dataframe(df, use_container_width=True, height=400)
+                st.dataframe(df, use_container_width=True, height=300)
                 st.info(f"총 {len(objects)}개 객체")
+                
+                st.markdown("---")
+                st.subheader("📥 개별 파일 다운로드 (임시 링크)")
+                
+                # 파일 선택용 selectbox
+                file_keys = [obj["Key"] for obj in objects]
+                selected_file = st.selectbox("다운로드할 파일 선택", file_keys)
+                
+                if st.button("🔗 임시 다운로드 링크 생성", use_container_width=True):
+                    tmp_url = get_presigned_url(selected_bucket, selected_file)
+                    if tmp_url:
+                        st.success(f"✅ 링크가 생성되었습니다 (7일간 유효)")
+                        st.code(tmp_url)
+                        st.link_button("🌐 브라우저에서 열기 / 다운로드", tmp_url, use_container_width=True)
             else:
                 st.info("객체가 없습니다.")
 
@@ -350,20 +453,44 @@ elif selected_tab == "🔬 Training Lab":
         if selected_config:
             config = load_config(selected_config)
             
-            st.markdown("##### 주요 파라미터 수정")
+            st.markdown("##### 📁 데이터 경로 설정")
+            data_dirs = get_data_directories()
             
             if task_type == "Change Detection":
+                current_data_dir = config.get("data", {}).get("local", {}).get("root_dir", "./data/change_detection")
+                # 폴더 이름만 추출 (./data/xxx -> xxx)
+                default_data_folder = Path(current_data_dir).name
+                
+                selected_data_folder = st.selectbox(
+                    "학습 데이터 폴더 (./data/)",
+                    data_dirs,
+                    index=data_dirs.index(default_data_folder) if default_data_folder in data_dirs else 0
+                )
+                custom_data_path = st.text_input("상세 경로 (직접 입력)", value=f"./data/{selected_data_folder}")
+                
+                st.markdown("##### 🧠 학습 파라미터 수정")
                 epochs = st.number_input("Epochs", value=config.get("training", {}).get("epochs", 50), min_value=1)
                 batch_size = st.number_input("Batch Size", value=config.get("training", {}).get("batch_size", 8), min_value=1)
                 lr = st.number_input("Learning Rate", value=config.get("training", {}).get("optimizer", {}).get("lr", 0.001), format="%.5f")
                 
-                overrides = f"training.epochs={epochs} training.batch_size={batch_size} training.optimizer.lr={lr}"
+                overrides = f"data.local.root_dir={custom_data_path} training.epochs={epochs} training.batch_size={batch_size} training.optimizer.lr={lr}"
                 script = "src/training/train_cd.py"
             else:
+                current_data_path = config.get("data", {}).get("source_path", "./data/nvs_project")
+                default_data_folder = Path(current_data_path).name
+                
+                selected_data_folder = st.selectbox(
+                    "학습 데이터 폴더 (./data/)",
+                    data_dirs,
+                    index=data_dirs.index(default_data_folder) if default_data_folder in data_dirs else 0
+                )
+                custom_data_path = st.text_input("상세 경로 (직접 입력)", value=f"./data/{selected_data_folder}")
+                
+                st.markdown("##### 🧠 학습 파라미터 수정")
                 iterations = st.number_input("Iterations", value=config.get("training", {}).get("iterations", 30000), min_value=100, step=1000)
                 sh_degree = st.number_input("SH Degree", value=config.get("model", {}).get("sh_degree", 3), min_value=0, max_value=3)
                 
-                overrides = f"training.iterations={iterations} model.sh_degree={sh_degree}"
+                overrides = f"data.source_path={custom_data_path} training.iterations={iterations} model.sh_degree={sh_degree}"
                 script = "src/training/train_nvs.py"
         
         st.markdown("---")
@@ -461,7 +588,7 @@ elif selected_tab == "📦 Model Registry":
                 st.markdown(f"**Full Run ID:** `{selected_run}`")
                 st.link_button(
                     "🔗 MLflow에서 보기",
-                    f"http://localhost:5000/#/experiments/0/runs/{selected_run}",
+                    f"http://{st.session_state.public_ip}:{MLFLOW_PORT}/#/experiments/0/runs/{selected_run}",
                     use_container_width=True
                 )
         else:
@@ -470,7 +597,8 @@ elif selected_tab == "📦 Model Registry":
     with col2:
         st.subheader("🔗 MLflow UI")
         
-        mlflow_url = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+        # 세션 초기화된 IP를 사용 (하드코딩된 PUBLIC_IP 대신)
+        mlflow_url = f"http://{st.session_state.public_ip}:{MLFLOW_PORT}"
         
         st.link_button(
             "🌐 MLflow UI 열기",
@@ -613,6 +741,10 @@ elif selected_tab == "🔮 Inference":
                 with st.spinner("렌더링 중... (시간이 걸릴 수 있습니다)"):
                     output_dir = PROJECT_ROOT / "output" / "dashboard_render"
                     
+                    # 서브프로세스 환경변수에 PUBLIC_IP 전달
+                    env = os.environ.copy()
+                    env["PUBLIC_IP"] = st.session_state.public_ip
+                    
                     if model_source == "PLY 체크포인트":
                         cmd = ["python", "src/inference/render_nvs.py",
                                "--checkpoint", checkpoint,
@@ -632,7 +764,7 @@ elif selected_tab == "🔮 Inference":
                                "--height", str(height),
                                "-o", str(output_dir)]
                     
-                    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=300)
+                    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=300, env=env)
                     
                     if result.returncode == 0:
                         # 비디오 파일 찾기
