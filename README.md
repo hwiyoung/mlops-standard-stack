@@ -80,9 +80,20 @@ PUBLIC_IP=192.168.10.203
 ## 🗺️ Roadmap & WIP
 Upcoming features and development milestones:
 
+### 📍 GIS & Visualization (Core)
 - [ ] **Real-time Indexing**: Implement `src/indexer/watch_bucket.py` for automated indexing via MinIO bucket event notifications.
 - [ ] **Advanced GIS Tools**: Add layer transparency sliders and multi-temporal swipe comparison for orthoimages.
 - [ ] **3D Visualization**: Integrate a 3D point cloud viewer to visualize 3DGS results directly on the map.
+
+### 🧠 ML Engineering (Algorithm)
+- [ ] **PyTorch Lightning Refactory**: Transition training scripts (`train_cd.py`, `train_nvs.py`) to Lightning for cleaner code and better scalability.
+- [ ] **DVC Data Versioning**: Connect MinIO with DVC to manage dataset versions alongside code commits.
+
+### 📊 Data Quality & Ops
+- [ ] **Geo-Data Validation**: Use **Great Expectations** to ensure GeoTIFF/JPEG metadata (GPS, Resolution) meets quality standards.
+- [ ] **Metadata Profiling**: Integrate **ydata-profiling** for automated statistical reports on the `image_metadata` database.
+
+### ⚙️ System & Infrastructure
 - [ ] **Scalability**: Implement background task queues (e.g., Celery/Redis) for batch processing massive datasets.
 - [ ] **Security**: Add user authentication (RBAC) and multi-tenanted project isolation.
 
