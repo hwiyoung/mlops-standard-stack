@@ -77,8 +77,14 @@ PUBLIC_IP=192.168.10.203
 └── docker-compose.yml  # Infrastructure definition
 ```
 
-## 📖 Documentation
-- [User Manual (Step-by-Step)](./dashboard_manual.md): Detailed guide on how to use each feature of the dashboard.
+## 🗺️ Roadmap & WIP
+Upcoming features and development milestones:
+
+- [ ] **Real-time Indexing**: Implement `src/indexer/watch_bucket.py` for automated indexing via MinIO bucket event notifications.
+- [ ] **Advanced GIS Tools**: Add layer transparency sliders and multi-temporal swipe comparison for orthoimages.
+- [ ] **3D Visualization**: Integrate a 3D point cloud viewer to visualize 3DGS results directly on the map.
+- [ ] **Scalability**: Implement background task queues (e.g., Celery/Redis) for batch processing massive datasets.
+- [ ] **Security**: Add user authentication (RBAC) and multi-tenanted project isolation.
 
 ## 🛡️ License
 This project is licensed under the Apache 2.0 License.
