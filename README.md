@@ -14,7 +14,11 @@ The project consists of several containerized services managed by Docker Compose
 ## 🌟 Key Features
 
 ### 1. Unified Dashboard
-- **📂 Data Manager**: Seamlessly upload local datasets to MinIO and generate secure, 7-day temporary download links (Presigned URLs).
+- **📂 Data Manager**: Seamlessly upload local datasets from `/workspace/data/` using a folder dropdown. Generate secure, 7-day temporary download links (Presigned URLs).
+- **📍 Map Browser**: Interactive GIS interface powered by **PostGIS**.
+    - **Photo Tracking**: Visualize drone/aerial photos as markers with GPS-based location.
+    - **Ortho-Visualization**: View high-resolution GeoTIFF (Orthoimage) extents as polygons.
+    - **Smart popups**: Preview thumbnails and click to view or download full-resolution images.
 - **🔬 Training Lab**: Execute Change Detection or 3DGS training with real-time log monitoring and dynamic parameter/path overrides.
 - **📦 Model Registry**: Review experiment metrics (IoU, PSNR) and directly access granular MLflow run details.
 - **🔮 Inference**: Visualize CD overlays and render 360-degree NVS videos directly in the browser.

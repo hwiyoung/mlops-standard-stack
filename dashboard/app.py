@@ -190,11 +190,12 @@ def get_presigned_url(bucket: str, key: str, expires_in: int = 604800) -> str:
         )
         
         # 외부 접근을 위해 호스트명 교체 (대시보드 세션 IP 기준)
-        import re
         public_ip = st.session_state.get("public_ip", "localhost")
         if public_ip not in ["localhost", "127.0.0.1", "mlflow", "minio"]:
             # http://minio:9000/... -> http://PUBLIC_IP:9000/...
-            url = re.sub(r'(http://)[^:/]+', r'\1' + public_ip, url)
+            # replace()를 사용하여 정규식 역참조 문제 방지
+            url = url.replace("http://minio:9000", f"http://{public_ip}:9000")
+            url = url.replace("http://localhost:9000", f"http://{public_ip}:9000")
             
         return url
     except Exception as e:
@@ -297,7 +298,7 @@ with st.sidebar:
     # 탭 선택
     selected_tab = st.radio(
         "메뉴 선택",
-        ["📂 Data Manager", "🔬 Training Lab", "📦 Model Registry", "🔮 Inference"],
+        ["📂 Data Manager", "📍 지도 브라우저", "🔬 Training Lab", "📦 Model Registry", "🔮 Inference"],
         label_visibility="collapsed"
     )
     
@@ -354,36 +355,193 @@ if selected_tab == "📂 Data Manager":
     
     with col1:
         st.subheader("📤 데이터 업로드")
+        st.caption("로컬 폴더를 MinIO 버킷으로 업로드합니다. 대용량 파일도 안정적으로 전송!")
         
-        with st.form("upload_form"):
-            project_name = st.text_input("프로젝트 이름", placeholder="my_project")
-            local_path = st.text_input("로컬 데이터 경로", placeholder="./data/my_data")
-            bucket = st.selectbox("대상 버킷", ["raw-data", "raw-data-nvs", "processed-data"])
-            
-            upload_btn = st.form_submit_button("🚀 업로드 시작", use_container_width=True)
-        
-        if upload_btn:
-            if project_name and local_path:
-                if Path(local_path).exists():
-                    with st.spinner("업로드 중..."):
-                        cmd = [
-                            "python", "scripts/upload_data.py",
-                            "--source", local_path,
-                            "--bucket", bucket,
-                            "--prefix", project_name
-                        ]
-                        result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
-                        
-                        if result.returncode == 0:
-                            st.success("✅ 업로드 완료!")
-                            st.code(result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout)
-                        else:
-                            st.error(f"❌ 업로드 실패")
-                            st.code(result.stderr)
-                else:
-                    st.error(f"경로가 존재하지 않습니다: {local_path}")
+        # 로컬 폴더 목록 조회 (/workspace/data 하위)
+        try:
+            data_root = Path("/workspace/data")
+            if data_root.exists():
+                # 모든 하위 디렉토리 탐색
+                subdirs = sorted([d for d in data_root.rglob("*") if d.is_dir()])
+                local_folder_options = [str(d) for d in subdirs]
             else:
-                st.warning("프로젝트 이름과 경로를 입력해주세요.")
+                local_folder_options = []
+        except:
+            local_folder_options = []
+            
+        with st.form("upload_form"):
+            if local_folder_options:
+                source_path = st.selectbox("📁 로컬 폴더 선택", local_folder_options, 
+                                           help="/workspace/data 하위의 폴더 중 업로드할 대상을 선택하세요.")
+            else:
+                source_path = st.text_input("📁 로컬 폴더 경로", placeholder="/workspace/data/folder_name", 
+                                            help="업로드할 파일들이 있는 로컬 컴퓨터의 폴더 경로")
+                
+            bucket = st.selectbox("🪣 대상 버킷", ["raw-data", "raw-data-nvs", "processed-data"],
+                                  help="MinIO에서 파일을 저장할 버킷")
+            prefix = st.text_input("📂 버킷 내 저장 경로", placeholder="project_name/",
+                                   help="버킷 안에서 파일들이 저장될 폴더 경로 (보통 폴더명과 동일하게 입력)")
+            
+            st.markdown("##### ⚙️ 옵션")
+            overwrite = st.checkbox("기존 파일 덮어쓰기", value=False, help="이미 존재하는 파일을 덮어씁니다 (기본: 건너뜀)")
+            
+            upload_btn = st.form_submit_button("🚀 업로드 실행", use_container_width=True, type="primary")
+        
+        if upload_btn and source_path:
+            if not Path(source_path).exists():
+                st.error(f"❌ 경로가 존재하지 않습니다: {source_path}")
+            else:
+                # 파일 수 및 크기 계산
+                files = list(Path(source_path).rglob("*"))
+                file_count = len([f for f in files if f.is_file()])
+                total_size = sum(f.stat().st_size for f in files if f.is_file())
+                
+                st.info(f"📊 {file_count}개 파일, 총 {total_size / (1024*1024):.1f} MB")
+                
+                # mc 명령어 구성 (기본적으로 기존 파일은 건너뜀)
+                mc_args = ["mc", "mirror"]
+                if overwrite:
+                    mc_args.append("--overwrite")
+                mc_args.extend([f"{source_path}/", f"myminio/{bucket}/{prefix}"])
+                
+                # 업로드 실행
+                progress_bar = st.progress(0, text="업로드 준비 중...")
+                log_area = st.empty()
+                
+                try:
+                    import subprocess
+                    process = subprocess.Popen(
+                        mc_args,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1
+                    )
+                    
+                    output_lines = []
+                    uploaded_count = 0
+                    
+                    for line in process.stdout:
+                        output_lines.append(line.strip())
+                        if len(output_lines) > 10:
+                            output_lines = output_lines[-10:]
+                        
+                        # 진행률 업데이트 (파일명이 출력될 때마다)
+                        if line.strip() and not line.startswith("mc:"):
+                            uploaded_count += 1
+                            progress = min(uploaded_count / max(file_count, 1), 1.0)
+                            progress_bar.progress(progress, text=f"업로드 중... {uploaded_count}/{file_count}")
+                        
+                        log_area.code("\n".join(output_lines), language="text")
+                    
+                    process.wait()
+                    
+                    if process.returncode == 0:
+                        progress_bar.progress(1.0, text="✅ 업로드 완료!")
+                        st.success(f"✅ {file_count}개 파일 업로드 완료!")
+                        
+                        # 자동 인덱싱 실행
+                        with st.spinner("🔄 지도 브라우저용 인덱싱 중..."):
+                            idx_cmd = [
+                                "python", "-m", "src.indexer.metadata_extractor",
+                                "--bucket", bucket,
+                                "--prefix", prefix
+                            ]
+                            idx_result = subprocess.run(idx_cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+                            if idx_result.returncode == 0:
+                                st.success("🗺️ 인덱싱 완료! 지도 브라우저 탭에서 확인하세요.")
+                            else:
+                                st.warning("⚠️ 인덱싱 실패 (수동으로 지도 브라우저에서 실행하세요)")
+                    else:
+                        st.error("❌ 업로드 중 오류 발생")
+                        
+                except FileNotFoundError:
+                    st.error("❌ mc CLI가 설치되지 않았습니다. 터미널에서 `./scripts/setup_minio_cli.sh` 를 먼저 실행하세요.")
+                except Exception as e:
+                    st.error(f"❌ 오류: {e}")
+        
+        st.markdown("---")
+        st.subheader("📥 데이터 다운로드")
+        st.caption("MinIO 버킷의 데이터를 로컬로 다운로드합니다.")
+        
+        # 버킷 선택 (폼 외부)
+        dl_bucket = st.selectbox("🪣 버킷 선택", ["raw-data", "raw-data-nvs", "processed-data", "mlflow-artifacts"], key="dl_bucket")
+        
+        # 선택된 버킷의 폴더 목록 조회
+        try:
+            s3 = get_minio_client()
+            paginator = s3.get_paginator("list_objects_v2")
+            folders = set()
+            for page in paginator.paginate(Bucket=dl_bucket):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    # 모든 폴더 경로 추출 (중첩 포함)
+                    parts = key.split("/")
+                    for i in range(1, len(parts)):
+                        folder_path = "/".join(parts[:i]) + "/"
+                        # thumbnails 폴더 제외
+                        if not folder_path.startswith("thumbnails"):
+                            folders.add(folder_path)
+            folder_list = sorted(list(folders))
+        except:
+            folder_list = []
+        
+        with st.form("download_form"):
+            if folder_list:
+                dl_prefix = st.selectbox("📂 다운로드할 폴더", folder_list, key="dl_prefix")
+            else:
+                dl_prefix = st.text_input("📂 버킷 내 경로", placeholder="project/output/", key="dl_prefix_text")
+            
+            dl_local = st.text_input("💾 로컬 저장 경로", placeholder="/workspace/downloads/", key="dl_local",
+                                     help="다운로드한 파일을 저장할 경로 (컨테이너 기준)")
+            
+            download_btn = st.form_submit_button("📥 다운로드 실행", use_container_width=True, type="primary")
+        
+        if download_btn and dl_prefix and dl_local:
+            # 다운로드 실행
+            mc_args = ["mc", "mirror", f"myminio/{dl_bucket}/{dl_prefix}", dl_local]
+            
+            progress_bar = st.progress(0, text="다운로드 준비 중...")
+            log_area = st.empty()
+            
+            try:
+                # 대상 폴더 생성
+                Path(dl_local).mkdir(parents=True, exist_ok=True)
+                
+                process = subprocess.Popen(
+                    mc_args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+                
+                output_lines = []
+                download_count = 0
+                
+                for line in process.stdout:
+                    output_lines.append(line.strip())
+                    if len(output_lines) > 10:
+                        output_lines = output_lines[-10:]
+                    
+                    if line.strip() and not line.startswith("mc:"):
+                        download_count += 1
+                        progress_bar.progress(min(download_count / 100, 0.99), text=f"다운로드 중... {download_count}개 파일")
+                    
+                    log_area.code("\n".join(output_lines), language="text")
+                
+                process.wait()
+                
+                if process.returncode == 0:
+                    progress_bar.progress(1.0, text="✅ 다운로드 완료!")
+                    st.success(f"✅ 다운로드 완료! 저장 위치: {dl_local}")
+                else:
+                    st.error("❌ 다운로드 중 오류 발생")
+                    
+            except FileNotFoundError:
+                st.error("❌ mc CLI가 설치되지 않았습니다.")
+            except Exception as e:
+                st.error(f"❌ 오류: {e}")
     
     with col2:
         st.subheader("📋 MinIO 데이터 목록")
@@ -420,7 +578,314 @@ if selected_tab == "📂 Data Manager":
 
 
 # ============================================
-# Tab 2: Training Lab
+# Tab 2: 📍 지도 브라우저
+# ============================================
+elif selected_tab == "📍 지도 브라우저":
+    st.markdown('<h1 class="main-header">📍 지도 브라우저</h1>', unsafe_allow_html=True)
+    
+    # DB 연결 함수
+    def get_db_connection():
+        import psycopg2
+        return psycopg2.connect(
+            host=os.getenv("POSTGRES_HOST", "localhost"),
+            port=os.getenv("POSTGRES_PORT", "5432"),
+            user=os.getenv("POSTGRES_USER", "mlflow"),
+            password=os.getenv("POSTGRES_PASSWORD", "mlflow123"),
+            dbname=os.getenv("POSTGRES_DB", "mlflow"),
+        )
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col2:
+        st.subheader("🔍 필터")
+        
+        # 버킷 필터
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT bucket FROM image_metadata ORDER BY bucket")
+            db_buckets = [row[0] for row in cur.fetchall()]
+            cur.close()
+            conn.close()
+        except:
+            db_buckets = []
+        
+        bucket_filter = st.selectbox("📦 버킷", ["전체"] + db_buckets, key="map_bucket_filter")
+        
+        # 폴더 필터 (DB에서 고유 폴더 경로 조회)
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT DISTINCT 
+                    CASE 
+                        WHEN position('/' in object_key) > 0 
+                        THEN substring(object_key from 1 for length(object_key) - position('/' in reverse(object_key)))
+                        ELSE ''
+                    END as folder
+                FROM image_metadata
+                ORDER BY folder
+            """)
+            db_folders = [row[0] for row in cur.fetchall() if row[0]]
+            cur.close()
+            conn.close()
+        except:
+            db_folders = []
+        
+        folder_filter = st.selectbox("📂 폴더 경로", ["전체"] + db_folders, key="map_folder_filter")
+        if folder_filter == "전체":
+            folder_filter = ""
+        
+        # 데이터 유형 필터
+        data_type_filter = st.selectbox("📷 데이터 유형", ["전체", "사진 (photo)", "정사영상 (ortho)"])
+        
+        st.markdown("---")
+        
+        # 통계 조회
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # 필터 조건 구성
+            where_clauses = ["1=1"]
+            if bucket_filter != "전체":
+                where_clauses.append(f"bucket = '{bucket_filter}'")
+            if folder_filter:
+                where_clauses.append(f"object_key LIKE '{folder_filter}%'")
+            if data_type_filter == "사진 (photo)":
+                where_clauses.append("data_type = 'photo'")
+            elif data_type_filter == "정사영상 (ortho)":
+                where_clauses.append("data_type = 'ortho'")
+            
+            where_sql = " AND ".join(where_clauses)
+            
+            cur.execute(f"SELECT COUNT(*) FROM image_metadata WHERE {where_sql}")
+            filtered_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM image_metadata")
+            total_count = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            
+            st.metric("표시 데이터", f"{filtered_count}개", f"전체 {total_count}개 중")
+        except Exception as e:
+            st.warning(f"DB 오류: {e}")
+            filtered_count = 0
+        
+        st.markdown("---")
+        
+        # 인덱싱 섹션 (접힘)
+        with st.expander("📊 신규 데이터 인덱싱"):
+            buckets = list_minio_buckets()
+            if buckets:
+                idx_bucket = st.selectbox("버킷", buckets, key="idx_bucket")
+                idx_prefix = st.text_input("Prefix", key="idx_prefix")
+                
+                if st.button("🔄 인덱싱 실행", use_container_width=True):
+                    with st.spinner("인덱싱 중..."):
+                        import subprocess
+                        cmd = [
+                            "python", "-m", "src.indexer.metadata_extractor",
+                            "--bucket", idx_bucket,
+                            "--prefix", idx_prefix
+                        ]
+                        result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+                        
+                        # 결과 파싱: 새로 추가된 파일 수 확인
+                        output = result.stdout + result.stderr
+                        new_count = output.count("✅ 인덱싱 완료:")
+                        skip_count = output.count("이미 인덱싱됨") if "이미 인덱싱됨" in output else 0
+                        
+                        if result.returncode == 0:
+                            st.success(f"✅ 완료! (신규: {new_count}개)")
+                            st.rerun()
+                        else:
+                            st.error("❌ 실패")
+                            st.code(result.stderr[-500:] if result.stderr else "알 수 없는 오류")
+    
+    with col1:
+        st.subheader("🗺️ 지도")
+        
+        try:
+            import folium
+            from streamlit_folium import st_folium
+            
+            # 필터 조건 구성
+            where_clauses = ["1=1"]
+            if bucket_filter != "전체":
+                where_clauses.append(f"bucket = '{bucket_filter}'")
+            if folder_filter:
+                where_clauses.append(f"object_key LIKE '{folder_filter}%'")
+            if data_type_filter == "사진 (photo)":
+                where_clauses.append("data_type = 'photo'")
+            elif data_type_filter == "정사영상 (ortho)":
+                where_clauses.append("data_type = 'ortho'")
+            
+            where_sql = " AND ".join(where_clauses)
+            
+            # 데이터 조회 및 bounds 계산
+            all_coords = []
+            photos = []
+            orthos = []
+            
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                
+                # 사진 (포인트) 조회
+                cur.execute(f"""
+                    SELECT id, filename, bucket, object_key, 
+                           ST_X(location) as lon, ST_Y(location) as lat,
+                           thumbnail_key, file_size
+                    FROM image_metadata 
+                    WHERE location IS NOT NULL AND {where_sql}
+                    LIMIT 500
+                """)
+                photos = cur.fetchall()
+                
+                for row in photos:
+                    all_coords.append((row[5], row[4]))  # lat, lon
+                
+                # 정사영상 (폴리곤) 조회
+                cur.execute(f"""
+                    SELECT id, filename, bucket, object_key,
+                           ST_AsGeoJSON(extent) as extent_geojson,
+                           ST_X(ST_Centroid(extent)) as clon, ST_Y(ST_Centroid(extent)) as clat,
+                           resolution, crs, file_size, thumbnail_key
+                    FROM image_metadata 
+                    WHERE extent IS NOT NULL AND {where_sql}
+                    LIMIT 100
+                """)
+                orthos = cur.fetchall()
+                
+                for row in orthos:
+                    if row[5] and row[6]:
+                        all_coords.append((row[6], row[5]))  # clat, clon
+                
+                cur.close()
+                conn.close()
+                
+            except Exception as e:
+                st.warning(f"데이터 로드 실패: {e}")
+            
+            # 지도 중심 및 줌 계산 (데이터 범위 기반)
+            if all_coords:
+                lats = [c[0] for c in all_coords]
+                lons = [c[1] for c in all_coords]
+                center_lat = sum(lats) / len(lats)
+                center_lon = sum(lons) / len(lons)
+                
+                # 범위에 맞는 줌 레벨 계산
+                lat_range = max(lats) - min(lats)
+                lon_range = max(lons) - min(lons)
+                max_range = max(lat_range, lon_range)
+                
+                if max_range < 0.01:
+                    zoom = 15
+                elif max_range < 0.1:
+                    zoom = 12
+                elif max_range < 1:
+                    zoom = 10
+                elif max_range < 5:
+                    zoom = 8
+                else:
+                    zoom = 6
+            else:
+                center_lat, center_lon, zoom = 36.5, 127.5, 7  # 기본값 (대한민국)
+            
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom)
+            
+            # 사진 마커 추가
+            for row in photos:
+                id_, filename, bucket, key, lon, lat, thumb_key, file_size = row
+                
+                # 원본 이미지 URL 생성
+                try:
+                    original_url = get_presigned_url(bucket, key, expires_in=3600)
+                except:
+                    original_url = ""
+                
+                # 썸네일 URL 생성 (클릭하면 원본 이미지 열림)
+                thumb_html = ""
+                if thumb_key:
+                    try:
+                        thumb_url = get_presigned_url(bucket, thumb_key, expires_in=3600)
+                        if thumb_url and original_url:
+                            thumb_html = f'<a href="{original_url}" target="_blank"><img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;cursor:pointer;" title="클릭하면 원본 이미지 열기"></a><br>'
+                        elif thumb_url:
+                            thumb_html = f'<img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;"><br>'
+                    except:
+                        pass
+                
+                # 용량을 MB로 표시
+                size_mb = file_size / (1024 * 1024)
+                popup_html = f"""
+                {thumb_html}
+                <b>{filename}</b><br>
+                📦 {bucket}<br>
+                📂 {'/'.join(key.split('/')[:-1])}<br>
+                💾 {size_mb:.1f} MB
+                """
+                folium.Marker(
+                    location=[lat, lon],
+                    popup=folium.Popup(popup_html, max_width=300),
+                    icon=folium.Icon(color="blue", icon="camera", prefix="fa")
+                ).add_to(m)
+            
+            # 정사영상 폴리곤 추가
+            import json
+            for row in orthos:
+                id_, filename, bucket, key, extent_json, clon, clat, resolution, crs, file_size, thumb_key = row
+                if extent_json:
+                    # 원본 이미지 URL (다운로드용)
+                    try:
+                        original_url = get_presigned_url(bucket, key, expires_in=3600)
+                    except:
+                        original_url = ""
+                        
+                    # 썸네일 URL 생성
+                    thumb_html = ""
+                    if thumb_key:
+                        try:
+                            thumb_url = get_presigned_url(bucket, thumb_key, expires_in=3600)
+                            if thumb_url and original_url:
+                                thumb_html = f'<a href="{original_url}" target="_blank"><img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;cursor:pointer;" title="클릭하면 다운로드"></a><br>'
+                            elif thumb_url:
+                                thumb_html = f'<img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;"><br>'
+                        except:
+                            pass
+
+                    geojson = json.loads(extent_json)
+                    res_str = f"{resolution:.2f}m" if resolution else "N/A"
+                    popup_html = f"""
+                    {thumb_html}
+                    <b>{filename}</b><br>
+                    📦 {bucket}<br>
+                    📏 해상도: {res_str}<br>
+                    💾 {file_size / (1024*1024):.1f} MB
+                    """
+                    folium.GeoJson(
+                        geojson,
+                        style_function=lambda x: {
+                            "fillColor": "#3388ff",
+                            "color": "#3388ff",
+                            "weight": 2,
+                            "fillOpacity": 0.3
+                        },
+                        popup=folium.Popup(popup_html, max_width=300)
+                    ).add_to(m)
+            
+            # 지도 표시 (returned_objects=[]로 불필요한 리런 방지)
+            st_folium(m, width=None, height=600, returned_objects=[])
+            
+            if not photos and not orthos:
+                st.info("📭 표시할 데이터가 없습니다. 오른쪽 패널에서 인덱싱을 실행하세요.")
+            
+        except ImportError:
+            st.error("📦 folium 또는 streamlit-folium이 설치되지 않았습니다.")
+
+
+# ============================================
+# Tab 3: Training Lab
 # ============================================
 elif selected_tab == "🔬 Training Lab":
     st.markdown('<h1 class="main-header">🔬 Training Lab</h1>', unsafe_allow_html=True)

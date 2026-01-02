@@ -1,9 +1,9 @@
 services:
   # ============================================
-  # PostgreSQL - MLflow 메타데이터 백엔드 스토어
+  # PostgreSQL + PostGIS - 메타데이터 백엔드 스토어
   # ============================================
   postgres:
-    image: postgres:15-alpine
+    image: postgis/postgis:15-3.4
     container_name: mlops-postgres
     restart: unless-stopped
     environment:
@@ -12,6 +12,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-mlflow}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_postgis.sql:/docker-entrypoint-initdb.d/init_postgis.sql:ro
     ports:
       - "5432:5432"
     networks:
@@ -157,12 +158,19 @@ services:
       - PUBLIC_IP=${PUBLIC_IP:-localhost}
       - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minio_secure_password_2024}
+      # PostgreSQL 연결 (Docker 네트워크)
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-mlflow}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mlflow123}
+      - POSTGRES_DB=${POSTGRES_DB:-mlflow}
     volumes:
       - ./data:/workspace/data
       - ./output:/workspace/output
       - ./configs:/workspace/configs
       - ./checkpoints:/workspace/checkpoints
       - ./dashboard:/workspace/dashboard
+      - ./src:/workspace/src
       - ./.env:/workspace/.env
     ports:
       - "8501:8501"
