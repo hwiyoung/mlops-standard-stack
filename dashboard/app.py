@@ -776,6 +776,19 @@ elif selected_tab == "📍 지도 브라우저":
                     props = item.get("properties", {})
                     assets = item.get("assets", {})
                     
+                    # thumbnail href에서 key 추출 (http://minio:9000/bucket/key 형태)
+                    thumb_href = assets.get("thumbnail", {}).get("href", "")
+                    thumb_key = ""
+                    if thumb_href and "/thumbnails/" in thumb_href:
+                        try:
+                            # http://minio:9000/raw-data/thumbnails/xxx.jpg -> thumbnails/xxx.jpg
+                            parts = thumb_href.split("/")
+                            bucket_idx = parts.index("raw-data") if "raw-data" in parts else -1
+                            if bucket_idx >= 0:
+                                thumb_key = "/".join(parts[bucket_idx + 1:])
+                        except:
+                            pass
+                    
                     if geom.get("type") == "Point":
                         lon, lat = geom["coordinates"]
                         all_coords.append((lat, lon))
@@ -787,8 +800,7 @@ elif selected_tab == "📍 지도 브라우저":
                             "lon": lon,
                             "lat": lat,
                             "file_size": props.get("file_size", 0),
-                            "image_url": assets.get("image", {}).get("href", ""),
-                            "thumb_url": assets.get("thumbnail", {}).get("href", ""),
+                            "thumb_key": thumb_key or props.get("thumbnail_key", ""),
                         })
                     elif geom.get("type") == "Polygon":
                         bbox = item.get("bbox", [])
@@ -804,8 +816,7 @@ elif selected_tab == "📍 지도 브라우저":
                             "geometry": geom,
                             "resolution": props.get("proj:resolution", [None])[0] if isinstance(props.get("proj:resolution"), list) else props.get("proj:resolution"),
                             "file_size": props.get("file_size", 0),
-                            "image_url": assets.get("image", {}).get("href", ""),
-                            "thumb_url": assets.get("thumbnail", {}).get("href", ""),
+                            "thumb_key": thumb_key or props.get("thumbnail_key", ""),
                         })
             else:
                 # 레거시 DB 모드
@@ -900,13 +911,18 @@ elif selected_tab == "📍 지도 브라우저":
             
             # 사진 마커 추가
             for photo in photos:
-                # URL 생성 (STAC이면 직접 사용, 레거시면 presigned URL)
-                if stac_available:
-                    original_url = photo.get("image_url", "")
-                    thumb_url = photo.get("thumb_url", "")
-                else:
+                # presigned URL 생성 (STAC/레거시 모두 동일)
+                try:
                     original_url = get_presigned_url(photo["bucket"], photo["key"], expires_in=3600) if photo.get("key") else ""
-                    thumb_url = get_presigned_url(photo["bucket"], photo.get("thumb_key", ""), expires_in=3600) if photo.get("thumb_key") else ""
+                except:
+                    original_url = ""
+                
+                # 썸네일 URL (thumb_key가 있으면 사용, 없으면 원본)
+                thumb_key = photo.get("thumb_key") or photo.get("key", "")
+                try:
+                    thumb_url = get_presigned_url(photo["bucket"], thumb_key, expires_in=3600) if thumb_key else ""
+                except:
+                    thumb_url = ""
                 
                 thumb_html = ""
                 if thumb_url:
@@ -930,12 +946,18 @@ elif selected_tab == "📍 지도 브라우저":
             
             # 정사영상 폴리곤 추가
             for ortho in orthos:
-                if stac_available:
-                    original_url = ortho.get("image_url", "")
-                    thumb_url = ortho.get("thumb_url", "")
-                else:
+                # presigned URL 생성 (STAC/레거시 모두 동일)
+                try:
                     original_url = get_presigned_url(ortho["bucket"], ortho["key"], expires_in=3600) if ortho.get("key") else ""
-                    thumb_url = get_presigned_url(ortho["bucket"], ortho.get("thumb_key", ""), expires_in=3600) if ortho.get("thumb_key") else ""
+                except:
+                    original_url = ""
+                
+                # 썸네일 URL (thumb_key가 있으면 사용)
+                thumb_key = ortho.get("thumb_key", "")
+                try:
+                    thumb_url = get_presigned_url(ortho["bucket"], thumb_key, expires_in=3600) if thumb_key else ""
+                except:
+                    thumb_url = ""
                 
                 thumb_html = ""
                 if thumb_url:
