@@ -164,6 +164,9 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-mlflow}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mlflow123}
       - POSTGRES_DB=${POSTGRES_DB:-mlflow}
+      # STAC API 연결
+      - STAC_API_URL=http://stac-api:8080
+      - TITILER_URL=http://titiler:8082
     volumes:
       - ./data:/workspace/data
       - ./output:/workspace/output
@@ -180,6 +183,75 @@ services:
     networks:
       - mlops-network
     command: ["streamlit", "run", "dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+
+  # ============================================
+  # STAC API (stac-fastapi + pgstac)
+  # ============================================
+  stac-api:
+    build:
+      context: ./docker/stac-api
+      dockerfile: Dockerfile
+    container_name: mlops-stac-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # stac-fastapi.pgstac 필수 환경변수
+      - POSTGRES_USER=${POSTGRES_USER:-mlflow}
+      - POSTGRES_PASS=${POSTGRES_PASSWORD:-mlflow123}
+      - POSTGRES_DBNAME=${POSTGRES_DB:-mlflow}
+      - POSTGRES_HOST_READER=postgres
+      - POSTGRES_HOST_WRITER=postgres
+      - POSTGRES_PORT=5432
+    ports:
+      - "8080:8080"
+    networks:
+      - mlops-network
+
+  # ============================================
+  # TiTiler - COG 타일 서버
+  # ============================================
+  titiler:
+    build:
+      context: ./docker/titiler
+      dockerfile: Dockerfile
+    container_name: mlops-titiler
+    restart: unless-stopped
+    depends_on:
+      - minio
+    environment:
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadmin123}
+      - AWS_S3_ENDPOINT=http://minio:9000
+      - AWS_HTTPS=NO
+      - AWS_VIRTUAL_HOSTING=FALSE
+    ports:
+      - "8082:8082"
+    networks:
+      - mlops-network
+
+  # ============================================
+  # STAC 초기화 (컬렉션 생성)
+  # ============================================
+  stac-init:
+    image: curlimages/curl:latest
+    container_name: mlops-stac-init
+    depends_on:
+      - stac-api
+    volumes:
+      - ./scripts/init_stac_collections.sh:/init_stac_collections.sh:ro
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Waiting for STAC API...';
+      sleep 15;
+      sh /init_stac_collections.sh;
+      exit 0;
+      "
+    environment:
+      - STAC_API_URL=http://stac-api:8080
+    networks:
+      - mlops-network
 
 # ============================================
 # 네트워크 설정

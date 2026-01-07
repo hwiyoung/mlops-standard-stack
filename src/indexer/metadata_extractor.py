@@ -205,13 +205,20 @@ def create_geotiff_thumbnail(file_path: str, max_size: int = 200) -> Optional[by
         return None
 
 
-def index_object(bucket: str, key: str) -> bool:
+def index_object(bucket: str, key: str, use_stac: bool = True) -> bool:
     """
-    MinIO 객체의 메타데이터를 추출하여 DB에 저장
+    MinIO 객체의 메타데이터를 추출하여 STAC API 또는 DB에 저장
+    
+    Args:
+        bucket: MinIO 버킷명
+        key: 객체 키
+        use_stac: True면 STAC API 사용, False면 기존 DB 직접 저장
     
     Returns:
         성공 여부
     """
+    from datetime import timezone
+    
     s3 = get_minio_client()
     filename = Path(key).name
     suffix = Path(key).suffix.lower()
@@ -229,15 +236,22 @@ def index_object(bucket: str, key: str) -> bool:
         # 파일 정보 조회
         head = s3.head_object(Bucket=bucket, Key=key)
         file_size = head.get("ContentLength", 0)
+        last_modified = head.get("LastModified")
+        
+        # MinIO 기본 URL
+        minio_url = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
         
         data_type = "photo"
-        location_wkt = None
-        extent_wkt = None
+        longitude = None
+        latitude = None
+        bbox = None
+        geometry = None
         crs = None
         resolution = None
         width = None
         height = None
         thumbnail_key = None
+        captured_at = last_modified.isoformat() if last_modified else datetime.now(timezone.utc).isoformat()
         
         if suffix in [".tif", ".tiff"]:
             # GeoTIFF 처리
@@ -252,11 +266,29 @@ def index_object(bucket: str, key: str) -> bool:
                 os.unlink(tmp.name)
             
             if result:
+                # WKT에서 좌표 추출
+                import re
                 extent_wkt = result["extent_wkt"]
-                crs = result["crs"]
-                resolution = result["resolution"]
-                width = result["width"]
-                height = result["height"]
+                coords = re.findall(r"[-\d.]+", extent_wkt)
+                if len(coords) >= 8:
+                    x_coords = [float(coords[i]) for i in range(0, len(coords), 2)]
+                    y_coords = [float(coords[i]) for i in range(1, len(coords), 2)]
+                    bbox = [min(x_coords), min(y_coords), max(x_coords), max(y_coords)]
+                    geometry = {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [bbox[0], bbox[1]],
+                            [bbox[2], bbox[1]],
+                            [bbox[2], bbox[3]],
+                            [bbox[0], bbox[3]],
+                            [bbox[0], bbox[1]]
+                        ]]
+                    }
+                
+                crs = result.get("crs")
+                resolution = result.get("resolution")
+                width = result.get("width")
+                height = result.get("height")
             
             if thumbnail:
                 thumb_key = f"thumbnails/{Path(key).stem}_thumb.jpg"
@@ -270,8 +302,23 @@ def index_object(bucket: str, key: str) -> bool:
             # GPS 추출
             coords = extract_exif_gps(image_data)
             if coords:
-                lon, lat = coords
-                location_wkt = f"POINT({lon} {lat})"
+                longitude, latitude = coords
+            
+            # EXIF 촬영 시간 추출
+            try:
+                from PIL.ExifTags import TAGS
+                img = Image.open(io.BytesIO(image_data))
+                exif_data = img._getexif()
+                if exif_data:
+                    for tag_id, value in exif_data.items():
+                        tag = TAGS.get(tag_id, tag_id)
+                        if tag == "DateTimeOriginal":
+                            # EXIF 형식: "2024:01:15 10:30:00"
+                            captured_at = datetime.strptime(value, "%Y:%m:%d %H:%M:%S").replace(tzinfo=timezone.utc).isoformat()
+                            break
+                width, height = img.size
+            except Exception:
+                pass
             
             # 썸네일 생성 및 업로드
             thumbnail = create_thumbnail(image_data)
@@ -279,52 +326,134 @@ def index_object(bucket: str, key: str) -> bool:
                 thumb_key = f"thumbnails/{Path(key).stem}_thumb.jpg"
                 s3.put_object(Bucket=bucket, Key=thumb_key, Body=thumbnail, ContentType="image/jpeg")
                 thumbnail_key = thumb_key
+        
+        # STAC 모드
+        if use_stac:
+            from .stac_client import STACClient
             
-            # 이미지 크기
-            img = Image.open(io.BytesIO(image_data))
-            width, height = img.size
+            stac = STACClient()
+            item_id = f"{bucket}-{key.replace('/', '-').replace('.', '-')}"
+            
+            # Asset URL 생성
+            image_url = f"{minio_url}/{bucket}/{key}"
+            assets = {
+                "image": {
+                    "href": image_url,
+                    "type": "image/tiff" if data_type == "ortho" else f"image/{suffix[1:]}",
+                    "roles": ["data"]
+                }
+            }
+            if thumbnail_key:
+                assets["thumbnail"] = {
+                    "href": f"{minio_url}/{bucket}/{thumbnail_key}",
+                    "type": "image/jpeg",
+                    "roles": ["thumbnail"]
+                }
+            
+            # 추가 속성
+            properties = {
+                "filename": filename,
+                "bucket": bucket,
+                "object_key": key,
+                "file_size": file_size,
+            }
+            if width:
+                properties["width"] = width
+            if height:
+                properties["height"] = height
+            
+            if data_type == "ortho" and geometry and bbox:
+                # 정사영상: orthoimages 컬렉션
+                epsg = None
+                if crs:
+                    import re
+                    epsg_match = re.search(r"EPSG:(\d+)", crs)
+                    if epsg_match:
+                        epsg = int(epsg_match.group(1))
+                
+                item = stac.create_orthoimage_item(
+                    item_id=item_id,
+                    bbox=bbox,
+                    geometry=geometry,
+                    datetime_str=captured_at,
+                    assets=assets,
+                    epsg=epsg,
+                    resolution=resolution,
+                    properties=properties,
+                )
+                success = stac.add_item("orthoimages", item)
+            elif longitude and latitude:
+                # 드론 사진: drone-photos 컬렉션
+                item = stac.create_drone_photo_item(
+                    item_id=item_id,
+                    longitude=longitude,
+                    latitude=latitude,
+                    datetime_str=captured_at,
+                    assets=assets,
+                    properties=properties,
+                )
+                success = stac.add_item("drone-photos", item)
+            else:
+                print(f"⚠️ 위치 정보 없음: {key}")
+                return False
+            
+            return success
         
-        # DB 저장
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        cur.execute("""
-            INSERT INTO image_metadata 
-            (bucket, object_key, filename, data_type, location, extent, 
-             file_size, width, height, crs, resolution, thumbnail_key)
-            VALUES (%s, %s, %s, %s, 
-                    ST_GeomFromText(%s, 4326), 
-                    ST_GeomFromText(%s, 4326),
-                    %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (object_key) DO UPDATE SET
-                data_type = EXCLUDED.data_type,
-                location = EXCLUDED.location,
-                extent = EXCLUDED.extent,
-                file_size = EXCLUDED.file_size,
-                width = EXCLUDED.width,
-                height = EXCLUDED.height,
-                crs = EXCLUDED.crs,
-                resolution = EXCLUDED.resolution,
-                thumbnail_key = EXCLUDED.thumbnail_key,
-                indexed_at = NOW()
-        """, (bucket, key, filename, data_type, location_wkt, extent_wkt,
-              file_size, width, height, crs, resolution, thumbnail_key))
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        
-        print(f"✅ 인덱싱 완료: {key} ({data_type})")
-        return True
+        # 기존 DB 모드 (레거시)
+        else:
+            location_wkt = f"POINT({longitude} {latitude})" if longitude and latitude else None
+            extent_wkt = None
+            if geometry:
+                from shapely.geometry import shape
+                extent_wkt = shape(geometry).wkt
+            
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            cur.execute("""
+                INSERT INTO image_metadata 
+                (bucket, object_key, filename, data_type, location, extent, 
+                 file_size, width, height, crs, resolution, thumbnail_key)
+                VALUES (%s, %s, %s, %s, 
+                        ST_GeomFromText(%s, 4326), 
+                        ST_GeomFromText(%s, 4326),
+                        %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (object_key) DO UPDATE SET
+                    data_type = EXCLUDED.data_type,
+                    location = EXCLUDED.location,
+                    extent = EXCLUDED.extent,
+                    file_size = EXCLUDED.file_size,
+                    width = EXCLUDED.width,
+                    height = EXCLUDED.height,
+                    crs = EXCLUDED.crs,
+                    resolution = EXCLUDED.resolution,
+                    thumbnail_key = EXCLUDED.thumbnail_key,
+                    indexed_at = NOW()
+            """, (bucket, key, filename, data_type, location_wkt, extent_wkt,
+                  file_size, width, height, crs, resolution, thumbnail_key))
+            
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            print(f"✅ 인덱싱 완료: {key} ({data_type})")
+            return True
         
     except Exception as e:
         print(f"❌ 인덱싱 실패 ({key}): {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
-def index_bucket(bucket: str, prefix: str = "") -> Tuple[int, int]:
+def index_bucket(bucket: str, prefix: str = "", use_stac: bool = True) -> Tuple[int, int]:
     """
     버킷 전체 인덱싱
+    
+    Args:
+        bucket: MinIO 버킷명
+        prefix: 경로 prefix
+        use_stac: True면 STAC API 사용, False면 기존 DB 직접 저장
     
     Returns:
         (성공 수, 실패 수)
@@ -341,7 +470,7 @@ def index_bucket(bucket: str, prefix: str = "") -> Tuple[int, int]:
         
         for obj in page["Contents"]:
             key = obj["Key"]
-            if index_object(bucket, key):
+            if index_object(bucket, key, use_stac=use_stac):
                 success += 1
             else:
                 failed += 1
@@ -357,10 +486,15 @@ if __name__ == "__main__":
     parser.add_argument("--bucket", "-b", default="raw-data", help="대상 버킷")
     parser.add_argument("--prefix", "-p", default="", help="경로 prefix")
     parser.add_argument("--key", "-k", help="단일 객체 키")
+    parser.add_argument("--legacy", action="store_true", help="기존 DB 모드 사용 (STAC 대신)")
     
     args = parser.parse_args()
+    use_stac = not args.legacy
+    
+    print(f"🔄 인덱싱 모드: {'STAC API' if use_stac else 'Legacy DB'}")
     
     if args.key:
-        index_object(args.bucket, args.key)
+        index_object(args.bucket, args.key, use_stac=use_stac)
     else:
-        index_bucket(args.bucket, args.prefix)
+        index_bucket(args.bucket, args.prefix, use_stac=use_stac)
+

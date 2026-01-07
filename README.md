@@ -9,15 +9,18 @@ The project consists of several containerized services managed by Docker Compose
 *   **📊 Streamlit Dashboard**: Central hub for managing the entire MLOps lifecycle.
 *   **📡 MLflow**: Experiment tracking and model registry.
 *   **📦 MinIO**: High-performance S3-compatible object storage for data and artifacts.
-*   **🐘 PostgreSQL**: Database backend for MLflow metadata.
+*   **🐘 PostgreSQL + PostGIS + pgstac**: Database backend for MLflow metadata and STAC catalog.
+*   **🌍 STAC API**: SpatioTemporal Asset Catalog for standardized geospatial data search.
+*   **🗺️ TiTiler**: Dynamic COG tile server for efficient orthoimage visualization.
 
 ## 🌟 Key Features
 
 ### 1. Unified Dashboard
 - **📂 Data Manager**: Seamlessly upload local datasets from `/workspace/data/` using a folder dropdown. Generate secure, 7-day temporary download links (Presigned URLs).
-- **📍 Map Browser**: Interactive GIS interface powered by **PostGIS**.
+- **📍 Map Browser**: Interactive GIS interface powered by **STAC API**.
+    - **STAC Collections**: Standardized catalog with `drone-photos` and `orthoimages` collections.
     - **Photo Tracking**: Visualize drone/aerial photos as markers with GPS-based location.
-    - **Ortho-Visualization**: View high-resolution GeoTIFF (Orthoimage) extents as polygons.
+    - **Ortho-Visualization**: View high-resolution GeoTIFF extents as polygons with TiTiler streaming.
     - **Smart popups**: Preview thumbnails and click to view or download full-resolution images.
 - **🔬 Training Lab**: Execute Change Detection or 3DGS training with real-time log monitoring and dynamic parameter/path overrides.
 - **📦 Model Registry**: Review experiment metrics (IoU, PSNR) and directly access granular MLflow run details.
@@ -81,6 +84,8 @@ PUBLIC_IP=192.168.10.203
 Upcoming features and development milestones:
 
 ### 📍 GIS & Visualization (Core)
+- [x] **STAC Integration**: Implemented STAC API for standardized geospatial metadata cataloging.
+- [x] **TiTiler COG Server**: Added dynamic tile server for efficient orthoimage streaming.
 - [ ] **Real-time Indexing**: Implement `src/indexer/watch_bucket.py` for automated indexing via MinIO bucket event notifications.
 - [ ] **Advanced GIS Tools**: Add layer transparency sliders and multi-temporal swipe comparison for orthoimages.
 - [ ] **3D Visualization**: Integrate a 3D point cloud viewer to visualize 3DGS results directly on the map.

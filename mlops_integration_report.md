@@ -54,6 +54,11 @@
 
 위 도구들의 도입 계획을 기존 서비스 로드맵과 통합하여 다음과 같은 우선순위로 추진합니다.
 
+### 0단계: 지오메타데이터 표준화 ✅ 완료
+- [x] **STAC API 통합**: stac-fastapi + pgstac 기반 표준 지리공간 메타데이터 카탈로그 구축.
+- [x] **TiTiler COG 서버**: 대용량 정사영상 동적 타일 스트리밍 지원.
+- [x] **인덱서 STAC 전환**: metadata_extractor.py가 STAC Item 형식으로 데이터 등록.
+
 ### 1단계: 인프라 및 기반 다지기 (Core & Engineering)
 - [ ] **PyTorch Lightning 전환**: 기존 학습 루프의 구조화 및 GPU 확장성 확보.
 - [ ] **DVC 버전 관리**: MinIO를 원격 저장소로 설정하여 데이터-코드 재현성 확보.

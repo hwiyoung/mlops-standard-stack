@@ -583,7 +583,41 @@ if selected_tab == "📂 Data Manager":
 elif selected_tab == "📍 지도 브라우저":
     st.markdown('<h1 class="main-header">📍 지도 브라우저</h1>', unsafe_allow_html=True)
     
-    # DB 연결 함수
+    # STAC API 설정
+    STAC_API_URL = os.getenv("STAC_API_URL", "http://localhost:8080")
+    TITILER_URL = os.getenv("TITILER_URL", "http://localhost:8082")
+    
+    def get_stac_collections():
+        """STAC 컬렉션 목록 조회"""
+        try:
+            import requests
+            response = requests.get(f"{STAC_API_URL}/collections", timeout=5)
+            if response.status_code == 200:
+                return [c["id"] for c in response.json().get("collections", [])]
+        except:
+            pass
+        return []
+    
+    def search_stac_items(collections=None, limit=500):
+        """STAC 검색"""
+        try:
+            import requests
+            params = {"limit": limit}
+            if collections:
+                params["collections"] = collections
+            response = requests.post(f"{STAC_API_URL}/search", json=params, timeout=30)
+            if response.status_code == 200:
+                return response.json().get("features", [])
+        except:
+            pass
+        return []
+    
+    def get_stac_item_count(collections=None):
+        """STAC 아이템 개수"""
+        items = search_stac_items(collections, limit=1000)
+        return len(items)
+    
+    # 레거시 DB 연결 함수
     def get_db_connection():
         import psycopg2
         return psycopg2.connect(
@@ -594,82 +628,92 @@ elif selected_tab == "📍 지도 브라우저":
             dbname=os.getenv("POSTGRES_DB", "mlflow"),
         )
     
+    # STAC API 사용 가능 여부
+    stac_available = len(get_stac_collections()) > 0
+    
     col1, col2 = st.columns([3, 1])
     
     with col2:
         st.subheader("🔍 필터")
         
-        # 버킷 필터
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT DISTINCT bucket FROM image_metadata ORDER BY bucket")
-            db_buckets = [row[0] for row in cur.fetchall()]
-            cur.close()
-            conn.close()
-        except:
-            db_buckets = []
-        
-        bucket_filter = st.selectbox("📦 버킷", ["전체"] + db_buckets, key="map_bucket_filter")
-        
-        # 폴더 필터 (DB에서 고유 폴더 경로 조회)
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT DISTINCT 
-                    CASE 
-                        WHEN position('/' in object_key) > 0 
-                        THEN substring(object_key from 1 for length(object_key) - position('/' in reverse(object_key)))
-                        ELSE ''
-                    END as folder
-                FROM image_metadata
-                ORDER BY folder
-            """)
-            db_folders = [row[0] for row in cur.fetchall() if row[0]]
-            cur.close()
-            conn.close()
-        except:
-            db_folders = []
-        
-        folder_filter = st.selectbox("📂 폴더 경로", ["전체"] + db_folders, key="map_folder_filter")
-        if folder_filter == "전체":
+        if stac_available:
+            # STAC 모드: 컬렉션 필터
+            collections = get_stac_collections()
+            collection_filter = st.selectbox("📁 컬렉션", ["전체"] + collections, key="map_collection_filter")
+            
+            # 데이터 유형 (컬렉션 기반 자동 설정)
+            if collection_filter == "drone-photos":
+                data_type_filter = "사진 (photo)"
+            elif collection_filter == "orthoimages":
+                data_type_filter = "정사영상 (ortho)"
+            else:
+                data_type_filter = st.selectbox("📷 데이터 유형", ["전체", "사진 (photo)", "정사영상 (ortho)"], key="map_type_filter")
+            
+            bucket_filter = "전체"  # STAC 모드에서는 사용 안 함
             folder_filter = ""
-        
-        # 데이터 유형 필터
-        data_type_filter = st.selectbox("📷 데이터 유형", ["전체", "사진 (photo)", "정사영상 (ortho)"])
+        else:
+            # 레거시 모드
+            st.info("⚠️ STAC API 미연결 - 레거시 모드")
+            collection_filter = "전체"
+            
+            # 버킷 필터
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT DISTINCT bucket FROM image_metadata ORDER BY bucket")
+                db_buckets = [row[0] for row in cur.fetchall()]
+                cur.close()
+                conn.close()
+            except:
+                db_buckets = []
+            
+            bucket_filter = st.selectbox("📦 버킷", ["전체"] + db_buckets, key="map_bucket_filter")
+            folder_filter = ""
+            data_type_filter = st.selectbox("📷 데이터 유형", ["전체", "사진 (photo)", "정사영상 (ortho)"])
         
         st.markdown("---")
         
         # 통계 조회
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
-            # 필터 조건 구성
-            where_clauses = ["1=1"]
-            if bucket_filter != "전체":
-                where_clauses.append(f"bucket = '{bucket_filter}'")
-            if folder_filter:
-                where_clauses.append(f"object_key LIKE '{folder_filter}%'")
-            if data_type_filter == "사진 (photo)":
-                where_clauses.append("data_type = 'photo'")
+        if stac_available:
+            # STAC 모드
+            selected_collections = None
+            if collection_filter != "전체":
+                selected_collections = [collection_filter]
+            elif data_type_filter == "사진 (photo)":
+                selected_collections = ["drone-photos"]
             elif data_type_filter == "정사영상 (ortho)":
-                where_clauses.append("data_type = 'ortho'")
+                selected_collections = ["orthoimages"]
             
-            where_sql = " AND ".join(where_clauses)
-            
-            cur.execute(f"SELECT COUNT(*) FROM image_metadata WHERE {where_sql}")
-            filtered_count = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM image_metadata")
-            total_count = cur.fetchone()[0]
-            cur.close()
-            conn.close()
-            
+            filtered_count = get_stac_item_count(selected_collections)
+            total_count = get_stac_item_count()
             st.metric("표시 데이터", f"{filtered_count}개", f"전체 {total_count}개 중")
-        except Exception as e:
-            st.warning(f"DB 오류: {e}")
-            filtered_count = 0
+        else:
+            # 레거시 모드
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                
+                where_clauses = ["1=1"]
+                if bucket_filter != "전체":
+                    where_clauses.append(f"bucket = '{bucket_filter}'")
+                if data_type_filter == "사진 (photo)":
+                    where_clauses.append("data_type = 'photo'")
+                elif data_type_filter == "정사영상 (ortho)":
+                    where_clauses.append("data_type = 'ortho'")
+                
+                where_sql = " AND ".join(where_clauses)
+                
+                cur.execute(f"SELECT COUNT(*) FROM image_metadata WHERE {where_sql}")
+                filtered_count = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM image_metadata")
+                total_count = cur.fetchone()[0]
+                cur.close()
+                conn.close()
+                
+                st.metric("표시 데이터", f"{filtered_count}개", f"전체 {total_count}개 중")
+            except Exception as e:
+                st.warning(f"DB 오류: {e}")
+                filtered_count = 0
         
         st.markdown("---")
         
@@ -708,64 +752,124 @@ elif selected_tab == "📍 지도 브라우저":
         try:
             import folium
             from streamlit_folium import st_folium
+            import json
             
-            # 필터 조건 구성
-            where_clauses = ["1=1"]
-            if bucket_filter != "전체":
-                where_clauses.append(f"bucket = '{bucket_filter}'")
-            if folder_filter:
-                where_clauses.append(f"object_key LIKE '{folder_filter}%'")
-            if data_type_filter == "사진 (photo)":
-                where_clauses.append("data_type = 'photo'")
-            elif data_type_filter == "정사영상 (ortho)":
-                where_clauses.append("data_type = 'ortho'")
-            
-            where_sql = " AND ".join(where_clauses)
-            
-            # 데이터 조회 및 bounds 계산
+            # 데이터 조회
             all_coords = []
             photos = []
             orthos = []
             
-            try:
-                conn = get_db_connection()
-                cur = conn.cursor()
+            if stac_available:
+                # STAC 모드: API 검색
+                search_collections = None
+                if collection_filter != "전체":
+                    search_collections = [collection_filter]
+                elif data_type_filter == "사진 (photo)":
+                    search_collections = ["drone-photos"]
+                elif data_type_filter == "정사영상 (ortho)":
+                    search_collections = ["orthoimages"]
                 
-                # 사진 (포인트) 조회
-                cur.execute(f"""
-                    SELECT id, filename, bucket, object_key, 
-                           ST_X(location) as lon, ST_Y(location) as lat,
-                           thumbnail_key, file_size
-                    FROM image_metadata 
-                    WHERE location IS NOT NULL AND {where_sql}
-                    LIMIT 500
-                """)
-                photos = cur.fetchall()
+                items = search_stac_items(collections=search_collections, limit=500)
                 
-                for row in photos:
-                    all_coords.append((row[5], row[4]))  # lat, lon
-                
-                # 정사영상 (폴리곤) 조회
-                cur.execute(f"""
-                    SELECT id, filename, bucket, object_key,
-                           ST_AsGeoJSON(extent) as extent_geojson,
-                           ST_X(ST_Centroid(extent)) as clon, ST_Y(ST_Centroid(extent)) as clat,
-                           resolution, crs, file_size, thumbnail_key
-                    FROM image_metadata 
-                    WHERE extent IS NOT NULL AND {where_sql}
-                    LIMIT 100
-                """)
-                orthos = cur.fetchall()
-                
-                for row in orthos:
-                    if row[5] and row[6]:
-                        all_coords.append((row[6], row[5]))  # clat, clon
-                
-                cur.close()
-                conn.close()
-                
-            except Exception as e:
-                st.warning(f"데이터 로드 실패: {e}")
+                for item in items:
+                    geom = item.get("geometry", {})
+                    props = item.get("properties", {})
+                    assets = item.get("assets", {})
+                    
+                    if geom.get("type") == "Point":
+                        lon, lat = geom["coordinates"]
+                        all_coords.append((lat, lon))
+                        photos.append({
+                            "id": item["id"],
+                            "filename": props.get("filename", item["id"]),
+                            "bucket": props.get("bucket", "raw-data"),
+                            "key": props.get("object_key", ""),
+                            "lon": lon,
+                            "lat": lat,
+                            "file_size": props.get("file_size", 0),
+                            "image_url": assets.get("image", {}).get("href", ""),
+                            "thumb_url": assets.get("thumbnail", {}).get("href", ""),
+                        })
+                    elif geom.get("type") == "Polygon":
+                        bbox = item.get("bbox", [])
+                        if len(bbox) >= 4:
+                            center_lon = (bbox[0] + bbox[2]) / 2
+                            center_lat = (bbox[1] + bbox[3]) / 2
+                            all_coords.append((center_lat, center_lon))
+                        orthos.append({
+                            "id": item["id"],
+                            "filename": props.get("filename", item["id"]),
+                            "bucket": props.get("bucket", "raw-data"),
+                            "key": props.get("object_key", ""),
+                            "geometry": geom,
+                            "resolution": props.get("proj:resolution", [None])[0] if isinstance(props.get("proj:resolution"), list) else props.get("proj:resolution"),
+                            "file_size": props.get("file_size", 0),
+                            "image_url": assets.get("image", {}).get("href", ""),
+                            "thumb_url": assets.get("thumbnail", {}).get("href", ""),
+                        })
+            else:
+                # 레거시 DB 모드
+                try:
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    
+                    where_clauses = ["1=1"]
+                    if bucket_filter != "전체":
+                        where_clauses.append(f"bucket = '{bucket_filter}'")
+                    if data_type_filter == "사진 (photo)":
+                        where_clauses.append("data_type = 'photo'")
+                    elif data_type_filter == "정사영상 (ortho)":
+                        where_clauses.append("data_type = 'ortho'")
+                    where_sql = " AND ".join(where_clauses)
+                    
+                    cur.execute(f"""
+                        SELECT id, filename, bucket, object_key, 
+                               ST_X(location) as lon, ST_Y(location) as lat,
+                               thumbnail_key, file_size
+                        FROM image_metadata 
+                        WHERE location IS NOT NULL AND {where_sql}
+                        LIMIT 500
+                    """)
+                    for row in cur.fetchall():
+                        all_coords.append((row[5], row[4]))
+                        photos.append({
+                            "id": row[0],
+                            "filename": row[1],
+                            "bucket": row[2],
+                            "key": row[3],
+                            "lon": row[4],
+                            "lat": row[5],
+                            "file_size": row[7] or 0,
+                            "thumb_key": row[6],
+                        })
+                    
+                    cur.execute(f"""
+                        SELECT id, filename, bucket, object_key,
+                               ST_AsGeoJSON(extent) as extent_geojson,
+                               ST_X(ST_Centroid(extent)) as clon, ST_Y(ST_Centroid(extent)) as clat,
+                               resolution, file_size, thumbnail_key
+                        FROM image_metadata 
+                        WHERE extent IS NOT NULL AND {where_sql}
+                        LIMIT 100
+                    """)
+                    for row in cur.fetchall():
+                        if row[5] and row[6]:
+                            all_coords.append((row[6], row[5]))
+                        orthos.append({
+                            "id": row[0],
+                            "filename": row[1],
+                            "bucket": row[2],
+                            "key": row[3],
+                            "geometry": json.loads(row[4]),
+                            "resolution": row[7],
+                            "file_size": row[8] or 0,
+                            "thumb_key": row[9],
+                        })
+                    
+                    cur.close()
+                    conn.close()
+                except Exception as e:
+                    st.warning(f"데이터 로드 실패: {e}")
             
             # 지도 중심 및 줌 계산 (데이터 범위 기반)
             if all_coords:
@@ -795,86 +899,71 @@ elif selected_tab == "📍 지도 브라우저":
             m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom)
             
             # 사진 마커 추가
-            for row in photos:
-                id_, filename, bucket, key, lon, lat, thumb_key, file_size = row
+            for photo in photos:
+                # URL 생성 (STAC이면 직접 사용, 레거시면 presigned URL)
+                if stac_available:
+                    original_url = photo.get("image_url", "")
+                    thumb_url = photo.get("thumb_url", "")
+                else:
+                    original_url = get_presigned_url(photo["bucket"], photo["key"], expires_in=3600) if photo.get("key") else ""
+                    thumb_url = get_presigned_url(photo["bucket"], photo.get("thumb_key", ""), expires_in=3600) if photo.get("thumb_key") else ""
                 
-                # 원본 이미지 URL 생성
-                try:
-                    original_url = get_presigned_url(bucket, key, expires_in=3600)
-                except:
-                    original_url = ""
-                
-                # 썸네일 URL 생성 (클릭하면 원본 이미지 열림)
                 thumb_html = ""
-                if thumb_key:
-                    try:
-                        thumb_url = get_presigned_url(bucket, thumb_key, expires_in=3600)
-                        if thumb_url and original_url:
-                            thumb_html = f'<a href="{original_url}" target="_blank"><img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;cursor:pointer;" title="클릭하면 원본 이미지 열기"></a><br>'
-                        elif thumb_url:
-                            thumb_html = f'<img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;"><br>'
-                    except:
-                        pass
+                if thumb_url:
+                    if original_url:
+                        thumb_html = f'<a href="{original_url}" target="_blank"><img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;cursor:pointer;" title="클릭하면 원본 열기"></a><br>'
+                    else:
+                        thumb_html = f'<img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;"><br>'
                 
-                # 용량을 MB로 표시
-                size_mb = file_size / (1024 * 1024)
+                size_mb = photo["file_size"] / (1024 * 1024)
                 popup_html = f"""
                 {thumb_html}
-                <b>{filename}</b><br>
-                📦 {bucket}<br>
-                📂 {'/'.join(key.split('/')[:-1])}<br>
+                <b>{photo['filename']}</b><br>
+                📦 {photo['bucket']}<br>
                 💾 {size_mb:.1f} MB
                 """
                 folium.Marker(
-                    location=[lat, lon],
+                    location=[photo["lat"], photo["lon"]],
                     popup=folium.Popup(popup_html, max_width=300),
                     icon=folium.Icon(color="blue", icon="camera", prefix="fa")
                 ).add_to(m)
             
             # 정사영상 폴리곤 추가
-            import json
-            for row in orthos:
-                id_, filename, bucket, key, extent_json, clon, clat, resolution, crs, file_size, thumb_key = row
-                if extent_json:
-                    # 원본 이미지 URL (다운로드용)
-                    try:
-                        original_url = get_presigned_url(bucket, key, expires_in=3600)
-                    except:
-                        original_url = ""
-                        
-                    # 썸네일 URL 생성
-                    thumb_html = ""
-                    if thumb_key:
-                        try:
-                            thumb_url = get_presigned_url(bucket, thumb_key, expires_in=3600)
-                            if thumb_url and original_url:
-                                thumb_html = f'<a href="{original_url}" target="_blank"><img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;cursor:pointer;" title="클릭하면 다운로드"></a><br>'
-                            elif thumb_url:
-                                thumb_html = f'<img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;"><br>'
-                        except:
-                            pass
-
-                    geojson = json.loads(extent_json)
-                    res_str = f"{resolution:.2f}m" if resolution else "N/A"
-                    popup_html = f"""
-                    {thumb_html}
-                    <b>{filename}</b><br>
-                    📦 {bucket}<br>
-                    📏 해상도: {res_str}<br>
-                    💾 {file_size / (1024*1024):.1f} MB
-                    """
-                    folium.GeoJson(
-                        geojson,
-                        style_function=lambda x: {
-                            "fillColor": "#3388ff",
-                            "color": "#3388ff",
-                            "weight": 2,
-                            "fillOpacity": 0.3
-                        },
-                        popup=folium.Popup(popup_html, max_width=300)
-                    ).add_to(m)
+            for ortho in orthos:
+                if stac_available:
+                    original_url = ortho.get("image_url", "")
+                    thumb_url = ortho.get("thumb_url", "")
+                else:
+                    original_url = get_presigned_url(ortho["bucket"], ortho["key"], expires_in=3600) if ortho.get("key") else ""
+                    thumb_url = get_presigned_url(ortho["bucket"], ortho.get("thumb_key", ""), expires_in=3600) if ortho.get("thumb_key") else ""
+                
+                thumb_html = ""
+                if thumb_url:
+                    if original_url:
+                        thumb_html = f'<a href="{original_url}" target="_blank"><img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;cursor:pointer;" title="클릭하면 다운로드"></a><br>'
+                    else:
+                        thumb_html = f'<img src="{thumb_url}" style="max-width:200px;max-height:150px;margin-bottom:8px;border-radius:4px;"><br>'
+                
+                res_str = f"{ortho['resolution']:.2f}m" if ortho.get("resolution") else "N/A"
+                popup_html = f"""
+                {thumb_html}
+                <b>{ortho['filename']}</b><br>
+                📦 {ortho['bucket']}<br>
+                📏 해상도: {res_str}<br>
+                💾 {ortho['file_size'] / (1024*1024):.1f} MB
+                """
+                folium.GeoJson(
+                    ortho["geometry"],
+                    style_function=lambda x: {
+                        "fillColor": "#3388ff",
+                        "color": "#3388ff",
+                        "weight": 2,
+                        "fillOpacity": 0.3
+                    },
+                    popup=folium.Popup(popup_html, max_width=300)
+                ).add_to(m)
             
-            # 지도 표시 (returned_objects=[]로 불필요한 리런 방지)
+            # 지도 표시
             st_folium(m, width=None, height=600, returned_objects=[])
             
             if not photos and not orthos:
